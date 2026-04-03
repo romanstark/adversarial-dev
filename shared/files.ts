@@ -3,21 +3,27 @@ import { join } from "path";
 import { execSync } from "child_process";
 import type { SprintContract, EvalResult, HarnessProgress } from "./types.ts";
 
-export async function initWorkspace(workDir: string): Promise<void> {
+export async function initWorkspace(
+  workDir: string,
+  options: { clean?: boolean } = {},
+): Promise<void> {
+  const clean = options.clean ?? true;
   await mkdir(join(workDir, "contracts"), { recursive: true });
   await mkdir(join(workDir, "feedback"), { recursive: true });
   await mkdir(join(workDir, "app"), { recursive: true });
 
   // Clean stale artifacts from previous runs
-  try { await unlink(join(workDir, "spec.md")); } catch {}
-  try { await unlink(join(workDir, "progress.json")); } catch {}
-  for (const dir of ["contracts", "feedback"]) {
-    try {
-      const files = await readdir(join(workDir, dir));
-      for (const f of files) {
-        await unlink(join(workDir, dir, f));
-      }
-    } catch {}
+  if (clean) {
+    try { await unlink(join(workDir, "spec.md")); } catch {}
+    try { await unlink(join(workDir, "progress.json")); } catch {}
+    for (const dir of ["contracts", "feedback"]) {
+      try {
+        const files = await readdir(join(workDir, dir));
+        for (const f of files) {
+          await unlink(join(workDir, dir, f));
+        }
+      } catch {}
+    }
   }
 
   // Initialize app/ as its own git repo so agent commits stay isolated
@@ -34,6 +40,29 @@ export async function initWorkspace(workDir: string): Promise<void> {
     } catch (err) {
       console.warn(`Warning: failed to initialize git in ${appDir}: ${err}`);
     }
+  }
+}
+
+export async function findLatestFeedbackRound(
+  workDir: string,
+  sprintNumber: number,
+): Promise<number | null> {
+  const feedbackDir = join(workDir, "feedback");
+  const pattern = new RegExp(`^sprint-${sprintNumber}-round-(\\d+)\\.json$`);
+
+  try {
+    const files = await readdir(feedbackDir);
+    const rounds = files
+      .map((file) => {
+        const match = file.match(pattern);
+        return match ? parseInt(match[1]!, 10) : null;
+      })
+      .filter((round): round is number => round !== null)
+      .sort((a, b) => b - a);
+
+    return rounds.length > 0 ? rounds[0]! : null;
+  } catch {
+    return null;
   }
 }
 

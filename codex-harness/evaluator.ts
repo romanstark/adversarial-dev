@@ -4,6 +4,10 @@ import { CODEX_MODEL, CODEX_NETWORK_ACCESS } from "../shared/config.ts";
 import { log, logError } from "../shared/logger.ts";
 import type { SprintContract, EvalResult } from "../shared/types.ts";
 
+function getCriterionThreshold(contract: SprintContract, criterion: string, fallback: number): number {
+  return contract.criteria.find((c) => c.name === criterion)?.threshold ?? fallback;
+}
+
 export async function runEvaluator(
   workDir: string,
   contract: SprintContract,
@@ -18,7 +22,8 @@ ${JSON.stringify(contract, null, 2)}
 
 ## Pass Threshold
 
-Each criterion must score at least ${passThreshold}/10 to pass.
+Each criterion must satisfy its own \
+\`threshold\` from the sprint contract. If a criterion has no threshold, use ${passThreshold}/10.
 
 ## Instructions
 
@@ -42,14 +47,15 @@ Examine the application in the \`app/\` directory. Read the code, run it if poss
 
   const evalResult = parseEvalResult(response, contract, passThreshold);
 
-  const passedCount = evalResult.feedback.filter((f) => f.score >= passThreshold).length;
+  const passedCount = evalResult.feedback.filter((f) => f.score >= getCriterionThreshold(contract, f.criterion, passThreshold)).length;
   const totalCount = evalResult.feedback.length;
   const verdict = evalResult.passed ? "PASSED" : "FAILED";
   log("EVALUATOR", `Sprint ${sprint}: ${verdict} (${passedCount}/${totalCount} criteria passed)`);
 
   for (const item of evalResult.feedback) {
-    const status = item.score >= passThreshold ? "\x1b[32mPASS\x1b[0m" : "\x1b[31mFAIL\x1b[0m";
-    log("EVALUATOR", `  [${status}] ${item.criterion}: ${item.score}/10 - ${item.details.slice(0, 100)}`);
+    const threshold = getCriterionThreshold(contract, item.criterion, passThreshold);
+    const status = item.score >= threshold ? "\x1b[32mPASS\x1b[0m" : "\x1b[31mFAIL\x1b[0m";
+    log("EVALUATOR", `  [${status}] ${item.criterion}: ${item.score}/10 (threshold ${threshold}) - ${item.details.slice(0, 100)}`);
   }
 
   return evalResult;
@@ -80,7 +86,7 @@ function parseEvalResult(
     try {
       const parsed = JSON.parse(candidate) as EvalResult;
       if (parsed.feedback && Array.isArray(parsed.feedback)) {
-        parsed.passed = parsed.feedback.every((f) => f.score >= passThreshold);
+        parsed.passed = parsed.feedback.every((f) => f.score >= getCriterionThreshold(contract, f.criterion, passThreshold));
         return parsed;
       }
     } catch {

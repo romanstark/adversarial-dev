@@ -4,7 +4,10 @@ export interface HarnessConfig {
   maxSprints: number;
   maxRetriesPerSprint: number;
   passThreshold: number;
+  resumeMode?: ResumeMode;
 }
+
+export type ResumeMode = "strict" | "reset-retries" | "reset-contract";
 
 export interface SprintContract {
   sprintNumber: number;

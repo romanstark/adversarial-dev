@@ -10,11 +10,16 @@ import {
   writeSpec,
   readSpec,
   writeContract,
+  readContract,
+  readFeedback,
   writeFeedback,
+  readProgress,
   writeProgress,
+  findLatestFeedbackRound,
 } from "../shared/files.ts";
 import type {
   HarnessConfig,
+  ResumeMode,
   SprintContract,
   EvalResult,
   HarnessProgress,
@@ -29,52 +34,100 @@ import { runEvaluator } from "./evaluator.ts";
 export async function runHarness(config: HarnessConfig): Promise<HarnessResult> {
   const startTime = Date.now();
   const results: SprintResult[] = [];
+  const isResume = config.resumeMode !== undefined;
+  const resumeMode: ResumeMode = config.resumeMode ?? "strict";
 
   log("HARNESS", "Initializing Codex SDK harness");
   log("HARNESS", `Work directory: ${config.workDir}`);
   log("HARNESS", `Max sprints: ${config.maxSprints} | Max retries: ${config.maxRetriesPerSprint} | Threshold: ${config.passThreshold}/10`);
-
-  await initWorkspace(config.workDir);
-
-  // Phase 1: Planning
-  logDivider();
-  log("HARNESS", "PHASE 1: PLANNING");
-  logDivider();
-
-  const progress: HarnessProgress = {
-    status: "planning",
-    currentSprint: 0,
-    totalSprints: 0,
-    completedSprints: 0,
-    retryCount: 0,
-  };
-  await writeProgress(config.workDir, progress);
-
-  const plannerResponse = await runPlanner(config.userPrompt, config.workDir);
-
-  // Planner may have written spec.md via its tools, or returned it as text
-  let spec: string;
-  try {
-    spec = await readSpec(config.workDir);
-  } catch {
-    log("HARNESS", "Planner returned spec as text, writing to spec.md");
-    await writeSpec(config.workDir, plannerResponse);
-    spec = plannerResponse;
+  if (isResume) {
+    log("HARNESS", `Resume mode: ${resumeMode}`);
   }
 
-  // Parse sprint count from spec - look for "Sprint N" patterns
-  const sprintNumbers = Array.from(spec.matchAll(/sprint\s+(\d+)/gi))
-    .map((m) => parseInt(m[1]!, 10))
-    .filter((n) => n > 0 && n <= config.maxSprints);
-  const totalSprints = sprintNumbers.length > 0
-    ? Math.min(Math.max(...sprintNumbers), config.maxSprints)
-    : 3; // Default to 3 if no sprint numbers found
+  await initWorkspace(config.workDir, { clean: !isResume });
 
-  progress.totalSprints = totalSprints;
-  log("HARNESS", `Planner produced ${totalSprints} sprints`);
+  let spec: string;
+  let totalSprints = 0;
+  let startSprint = 1;
+  let initialRetryForSprint = 0;
+  let reuseExistingContractOnStartSprint = false;
+  let lastEvalForStartSprint: EvalResult | undefined;
+
+  const progress: HarnessProgress = isResume
+    ? await readProgress(config.workDir)
+    : {
+      status: "planning",
+      currentSprint: 0,
+      totalSprints: 0,
+      completedSprints: 0,
+      retryCount: 0,
+    };
+
+  if (!isResume) {
+    // Phase 1: Planning
+    logDivider();
+    log("HARNESS", "PHASE 1: PLANNING");
+    logDivider();
+
+    await writeProgress(config.workDir, progress);
+
+    const plannerResponse = await runPlanner(config.userPrompt, config.workDir);
+
+    // Planner may have written spec.md via its tools, or returned it as text
+    try {
+      spec = await readSpec(config.workDir);
+    } catch {
+      log("HARNESS", "Planner returned spec as text, writing to spec.md");
+      await writeSpec(config.workDir, plannerResponse);
+      spec = plannerResponse;
+    }
+
+    // Parse sprint count from spec - look for "Sprint N" patterns
+    totalSprints = deriveTotalSprints(spec, config.maxSprints);
+    progress.totalSprints = totalSprints;
+    log("HARNESS", `Planner produced ${totalSprints} sprints`);
+  } else {
+    spec = await readSpec(config.workDir);
+    totalSprints = progress.totalSprints > 0 ? progress.totalSprints : deriveTotalSprints(spec, config.maxSprints);
+    progress.totalSprints = totalSprints;
+
+    if (progress.status === "complete") {
+      log("HARNESS", "Resume requested but harness is already complete.");
+      return { success: true, sprints: [], totalDurationMs: Date.now() - startTime };
+    }
+
+    if (progress.currentSprint <= 0) {
+      throw new Error("Cannot resume: progress.json does not contain a valid currentSprint");
+    }
+
+    startSprint = progress.currentSprint;
+    const latestRound = await findLatestFeedbackRound(config.workDir, startSprint);
+    if (latestRound !== null) {
+      lastEvalForStartSprint = await readFeedback(config.workDir, startSprint, latestRound);
+    }
+
+    if (resumeMode === "strict") {
+      if (progress.status === "failed" && latestRound !== null && latestRound >= config.maxRetriesPerSprint) {
+        throw new Error(
+          `Cannot strictly resume sprint ${startSprint}: retry budget exhausted (last round ${latestRound})`,
+        );
+      }
+      initialRetryForSprint = latestRound === null ? 0 : latestRound + 1;
+      reuseExistingContractOnStartSprint = true;
+    } else if (resumeMode === "reset-retries") {
+      initialRetryForSprint = 0;
+      reuseExistingContractOnStartSprint = true;
+    } else {
+      initialRetryForSprint = 0;
+      reuseExistingContractOnStartSprint = false;
+      lastEvalForStartSprint = undefined;
+    }
+
+    log("HARNESS", `Resuming at sprint ${startSprint}/${totalSprints} from retry ${initialRetryForSprint}`);
+  }
 
   // Phase 2-4: Sprint Loop
-  for (let sprint = 1; sprint <= totalSprints; sprint++) {
+  for (let sprint = startSprint; sprint <= totalSprints; sprint++) {
     logDivider();
     log("HARNESS", `SPRINT ${sprint}/${totalSprints}`);
     logDivider();
@@ -82,20 +135,29 @@ export async function runHarness(config: HarnessConfig): Promise<HarnessResult> 
     // Phase 2: Contract Negotiation
     progress.status = "negotiating";
     progress.currentSprint = sprint;
-    progress.retryCount = 0;
+    progress.retryCount = sprint === startSprint ? initialRetryForSprint : 0;
     await writeProgress(config.workDir, progress);
 
-    log("HARNESS", "Negotiating sprint contract...");
-    const contract = await negotiateContract(config.workDir, spec, sprint);
-    await writeContract(config.workDir, contract);
+    let contract: SprintContract;
+    const shouldReuseContract = sprint === startSprint && reuseExistingContractOnStartSprint;
+    if (shouldReuseContract) {
+      log("HARNESS", "Reusing existing sprint contract...");
+      contract = await readContract(config.workDir, sprint);
+    } else {
+      log("HARNESS", "Negotiating sprint contract...");
+      contract = await negotiateContract(config.workDir, spec, sprint);
+      await writeContract(config.workDir, contract);
+    }
     log("HARNESS", `Contract agreed: ${contract.criteria.length} criteria for ${contract.features.length} features`);
 
     // Phase 3-4: Build-Evaluate Loop
     let passed = false;
-    let lastEval: EvalResult | undefined;
+    let lastEval: EvalResult | undefined = sprint === startSprint ? lastEvalForStartSprint : undefined;
     let attempts = 0;
 
-    for (let retry = 0; retry <= config.maxRetriesPerSprint; retry++) {
+    const retryStart = sprint === startSprint ? initialRetryForSprint : 0;
+
+    for (let retry = retryStart; retry <= config.maxRetriesPerSprint; retry++) {
       attempts = retry + 1;
 
       // Build
@@ -152,6 +214,16 @@ export async function runHarness(config: HarnessConfig): Promise<HarnessResult> 
   log("HARNESS", `Sprints: ${results.filter((r) => r.passed).length}/${results.length} passed`);
 
   return { success: allPassed, sprints: results, totalDurationMs: totalDuration };
+}
+
+function deriveTotalSprints(spec: string, maxSprints: number): number {
+  const sprintNumbers = Array.from(spec.matchAll(/sprint\s+(\d+)/gi))
+    .map((m) => parseInt(m[1]!, 10))
+    .filter((n) => n > 0 && n <= maxSprints);
+
+  return sprintNumbers.length > 0
+    ? Math.min(Math.max(...sprintNumbers), maxSprints)
+    : 3;
 }
 
 async function negotiateContract(

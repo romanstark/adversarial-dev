@@ -54,6 +54,23 @@ bun run codex-harness/index.ts "Build a personal task manager with a REST API, i
 
 Both harnesses write their output to `workspace/claude/` and `workspace/codex/` respectively. The built application lives in `workspace/{sdk}/app/`.
 
+### Resume an Existing Harness Run
+
+You can resume from an existing `workspace/{sdk}/progress.json` state:
+
+```bash
+# strict resume (default when no value is provided)
+bun run claude-harness/index.ts --resume
+
+# resume current sprint with retry counter reset
+bun run claude-harness/index.ts --resume=reset-retries
+
+# resume current sprint with a newly negotiated contract
+bun run claude-harness/index.ts --resume=reset-contract
+```
+
+Same flags are supported for `codex-harness/index.ts`.
+
 ## Configuration
 
 Defaults are in `shared/config.ts`:
