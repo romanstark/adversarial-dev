@@ -39,22 +39,7 @@ Examine the application in the \`app/\` directory. Read the code, run it if poss
     persistSession: false,
   };
 
-  let fullResponse = "";
-
-  for await (const msg of query({ prompt, options })) {
-    if (msg.type === "assistant") {
-      const message = msg as { message: { content: Array<{ type: string; text?: string; name?: string }> } };
-      for (const block of message.message.content) {
-        if (block.type === "text" && block.text) {
-          fullResponse += block.text;
-        } else if (block.type === "tool_use" && block.name) {
-          log("EVALUATOR", `  Tool: ${block.name}`);
-        }
-      }
-    } else if (msg.type === "result") {
-      log("EVALUATOR", `Evaluation complete for sprint ${sprint}`);
-    }
-  }
+  const fullResponse = await runEvaluationTurn(prompt, options, sprint);
 
   const invalidThresholds = contract.criteria
     .filter((criterion) => !Number.isInteger(criterion.threshold) || criterion.threshold < 1 || criterion.threshold > 10)
@@ -67,7 +52,17 @@ Examine the application in the \`app/\` directory. Read the code, run it if poss
     );
   }
 
-  const evalResult = parseEvalResult(fullResponse, contract, passThreshold);
+  let evalResult = tryParseEvalResult(fullResponse, contract, passThreshold);
+  if (!evalResult) {
+    logError("EVALUATOR", "Failed to parse evaluation JSON from first attempt; retrying evaluator once...");
+    const recoveryPrompt = `${prompt}\n\nCRITICAL RETRY INSTRUCTION: Your previous response was not valid JSON. Re-run any checks you need, then output ONLY a valid JSON object matching the required schema.`;
+    const recoveryResponse = await runEvaluationTurn(recoveryPrompt, { ...options, maxTurns: Math.max(CLAUDE_MAX_TURNS, 80) }, sprint);
+    evalResult = tryParseEvalResult(recoveryResponse, contract, passThreshold);
+  }
+
+  if (!evalResult) {
+    evalResult = buildParseFailureEvalResult(contract, fullResponse);
+  }
 
   const passedCount = evalResult.feedback.filter((f) => f.score >= getCriterionThreshold(contract, f.criterion, passThreshold)).length;
   const totalCount = evalResult.feedback.length;
@@ -83,11 +78,11 @@ Examine the application in the \`app/\` directory. Read the code, run it if poss
   return evalResult;
 }
 
-function parseEvalResult(
+function tryParseEvalResult(
   response: string,
   contract: SprintContract,
   passThreshold: number,
-): EvalResult {
+): EvalResult | null {
   // Try multiple strategies to extract JSON from the response
   const candidates: string[] = [];
 
@@ -116,6 +111,10 @@ function parseEvalResult(
     }
   }
 
+  return null;
+}
+
+function buildParseFailureEvalResult(contract: SprintContract, response: string): EvalResult {
   logError("EVALUATOR", "Failed to parse evaluation JSON from any extraction strategy");
   return {
     passed: false,
@@ -127,4 +126,60 @@ function parseEvalResult(
     })),
     overallSummary: "Evaluation parsing failed. Raw response: " + response.slice(0, 500),
   };
+}
+
+async function runEvaluationTurn(prompt: string, options: Options, sprint: number): Promise<string> {
+  let fullResponse = "";
+
+  for await (const msg of query({ prompt, options })) {
+    if (msg.type === "assistant") {
+      const message = msg as { message: { content: Array<{ type: string; text?: string; name?: string }> } };
+      for (const block of message.message.content) {
+        if (block.type === "text" && block.text) {
+          fullResponse += block.text + "\n";
+        } else if (block.type === "tool_use" && block.name) {
+          log("EVALUATOR", `  Tool: ${block.name}`);
+        }
+      }
+    } else if (msg.type === "result") {
+      const resultText = extractResultText(msg);
+      if (resultText) {
+        fullResponse += resultText + "\n";
+      }
+      log("EVALUATOR", `Evaluation complete for sprint ${sprint}`);
+    }
+  }
+
+  return fullResponse.trim();
+}
+
+function extractResultText(resultMsg: unknown): string {
+  const chunks: string[] = [];
+
+  const visit = (value: unknown, depth: number): void => {
+    if (depth > 3 || value === null || value === undefined) return;
+
+    if (typeof value === "string") {
+      const trimmed = value.trim();
+      if (trimmed.startsWith("{") || trimmed.startsWith("```")) {
+        chunks.push(trimmed);
+      }
+      return;
+    }
+
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item, depth + 1);
+      return;
+    }
+
+    if (typeof value === "object") {
+      for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+        if (key === "type") continue;
+        visit(child, depth + 1);
+      }
+    }
+  };
+
+  visit(resultMsg, 0);
+  return chunks.join("\n");
 }

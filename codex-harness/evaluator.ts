@@ -53,7 +53,18 @@ Examine the application in the \`app/\` directory. Read the code, run it if poss
     );
   }
 
-  const evalResult = parseEvalResult(response, contract, passThreshold);
+  let evalResult = tryParseEvalResult(response, contract, passThreshold);
+  if (!evalResult) {
+    logError("EVALUATOR", "Failed to parse evaluation JSON from first attempt; retrying evaluator once...");
+    const recoveryPrompt = `${fullPrompt}\n\nCRITICAL RETRY INSTRUCTION: Your previous response was not valid JSON. Re-run any checks you need, then output ONLY a valid JSON object matching the required schema.`;
+    const recoveryTurn = await thread.run(recoveryPrompt);
+    const recoveryResponse = recoveryTurn.finalResponse ?? "";
+    evalResult = tryParseEvalResult(recoveryResponse, contract, passThreshold);
+  }
+
+  if (!evalResult) {
+    evalResult = buildParseFailureEvalResult(contract, response);
+  }
 
   const passedCount = evalResult.feedback.filter((f) => f.score >= getCriterionThreshold(contract, f.criterion, passThreshold)).length;
   const totalCount = evalResult.feedback.length;
@@ -69,11 +80,11 @@ Examine the application in the \`app/\` directory. Read the code, run it if poss
   return evalResult;
 }
 
-function parseEvalResult(
+function tryParseEvalResult(
   response: string,
   contract: SprintContract,
   passThreshold: number,
-): EvalResult {
+): EvalResult | null {
   // Try multiple strategies to extract JSON from the response
   const candidates: string[] = [];
 
@@ -102,6 +113,10 @@ function parseEvalResult(
     }
   }
 
+  return null;
+}
+
+function buildParseFailureEvalResult(contract: SprintContract, response: string): EvalResult {
   logError("EVALUATOR", "Failed to parse evaluation JSON from any extraction strategy");
   return {
     passed: false,
