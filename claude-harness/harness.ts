@@ -132,6 +132,7 @@ export async function runHarness(config: HarnessConfig): Promise<HarnessResult> 
       initialRetryForSprint = 0;
       reuseExistingContractOnStartSprint = false;
       lastEvalForStartSprint = undefined;
+      stabilityStateForStartSprint = undefined;
     }
 
     log("HARNESS", `Resuming at sprint ${startSprint}/${totalSprints} from retry ${initialRetryForSprint}`);
