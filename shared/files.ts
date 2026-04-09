@@ -1,7 +1,7 @@
 import { mkdir, readFile, writeFile, access, rm, readdir, unlink } from "fs/promises";
 import { join } from "path";
 import { execSync } from "child_process";
-import type { SprintContract, EvalResult, HarnessProgress } from "./types.ts";
+import type { SprintContract, EvalResult, HarnessProgress, SprintStabilityState } from "./types.ts";
 
 export async function initWorkspace(
   workDir: string,
@@ -110,6 +110,28 @@ export async function readFeedback(
     return JSON.parse(raw) as EvalResult;
   } catch {
     throw new Error(`Invalid JSON in feedback file: ${path}`);
+  }
+}
+
+export async function writeSprintStabilityState(
+  workDir: string,
+  sprintNumber: number,
+  state: SprintStabilityState,
+): Promise<void> {
+  const path = join(workDir, "feedback", `sprint-${sprintNumber}-stability.json`);
+  await writeFile(path, JSON.stringify(state, null, 2), "utf-8");
+}
+
+export async function readSprintStabilityState(
+  workDir: string,
+  sprintNumber: number,
+): Promise<SprintStabilityState> {
+  const path = join(workDir, "feedback", `sprint-${sprintNumber}-stability.json`);
+  const raw = await readFile(path, "utf-8");
+  try {
+    return JSON.parse(raw) as SprintStabilityState;
+  } catch {
+    throw new Error(`Invalid JSON in stability state file: ${path}`);
   }
 }
 

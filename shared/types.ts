@@ -5,9 +5,12 @@ export interface HarnessConfig {
   maxRetriesPerSprint: number;
   passThreshold: number;
   resumeMode?: ResumeMode;
+  retryStrategy: RetryStrategy;
+  hardFailUnlockStreak: number;
 }
 
 export type ResumeMode = "strict" | "reset-retries" | "reset-contract";
+export type RetryStrategy = "strict" | "stabilized";
 
 export interface SprintContract {
   sprintNumber: number;
@@ -53,4 +56,25 @@ export interface HarnessResult {
   success: boolean;
   sprints: SprintResult[];
   totalDurationMs: number;
+}
+
+export type CriterionOutcome = "pass" | "inconclusive" | "hard_fail";
+
+export interface CriterionStabilityState {
+  locked: boolean;
+  bestScore: number;
+  consecutiveHardFails: number;
+  lastObservedScore: number;
+  lastObservedOutcome: CriterionOutcome;
+}
+
+export interface SprintStabilityState {
+  sprintNumber: number;
+  criteria: Record<string, CriterionStabilityState>;
+}
+
+export interface StabilizationSummary {
+  lockedPassRetained: number;
+  unlockedRegressions: number;
+  inconclusiveRetained: number;
 }

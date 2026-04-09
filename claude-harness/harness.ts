@@ -16,7 +16,10 @@ import {
   readProgress,
   writeProgress,
   findLatestFeedbackRound,
+  readSprintStabilityState,
+  writeSprintStabilityState,
 } from "../shared/files.ts";
+import { stabilizeEvaluation, buildStabilityStateFromEval, getFailedCriteria } from "../shared/evaluation.ts";
 import type {
   HarnessConfig,
   ResumeMode,
@@ -25,6 +28,7 @@ import type {
   HarnessProgress,
   HarnessResult,
   SprintResult,
+  SprintStabilityState,
 } from "../shared/types.ts";
 
 import { runPlanner } from "./planner.ts";
@@ -40,6 +44,7 @@ export async function runHarness(config: HarnessConfig): Promise<HarnessResult> 
   log("HARNESS", "Initializing Claude Agent SDK harness");
   log("HARNESS", `Work directory: ${config.workDir}`);
   log("HARNESS", `Max sprints: ${config.maxSprints} | Max retries: ${config.maxRetriesPerSprint} | Threshold: ${config.passThreshold}/10`);
+  log("HARNESS", `Retry strategy: ${config.retryStrategy} (unlock streak: ${config.hardFailUnlockStreak})`);
   if (isResume) {
     log("HARNESS", `Resume mode: ${resumeMode}`);
   }
@@ -52,6 +57,7 @@ export async function runHarness(config: HarnessConfig): Promise<HarnessResult> 
   let initialRetryForSprint = 0;
   let reuseExistingContractOnStartSprint = false;
   let lastEvalForStartSprint: EvalResult | undefined;
+  let stabilityStateForStartSprint: SprintStabilityState | undefined;
 
   const progress: HarnessProgress = isResume
     ? await readProgress(config.workDir)
@@ -104,6 +110,11 @@ export async function runHarness(config: HarnessConfig): Promise<HarnessResult> 
     const latestRound = await findLatestFeedbackRound(config.workDir, startSprint);
     if (latestRound !== null) {
       lastEvalForStartSprint = await readFeedback(config.workDir, startSprint, latestRound);
+      try {
+        stabilityStateForStartSprint = await readSprintStabilityState(config.workDir, startSprint);
+      } catch {
+        // Backward compatibility: older runs do not have stability snapshots
+      }
     }
 
     if (resumeMode === "strict") {
@@ -153,6 +164,7 @@ export async function runHarness(config: HarnessConfig): Promise<HarnessResult> 
     // Phase 3-4: Build-Evaluate Loop
     let passed = false;
     let lastEval: EvalResult | undefined = sprint === startSprint ? lastEvalForStartSprint : undefined;
+    let sprintStabilityState: SprintStabilityState | undefined = sprint === startSprint ? stabilityStateForStartSprint : undefined;
     let attempts = 0;
 
     const retryStart = sprint === startSprint ? initialRetryForSprint : 0;
@@ -165,13 +177,36 @@ export async function runHarness(config: HarnessConfig): Promise<HarnessResult> 
       progress.retryCount = retry;
       await writeProgress(config.workDir, progress);
 
-      await runGenerator(config.workDir, spec, contract, lastEval);
+      if (!sprintStabilityState && lastEval) {
+        sprintStabilityState = buildStabilityStateFromEval(contract, lastEval, config.passThreshold);
+      }
+
+      const retryFocusCriteria = lastEval
+        ? getFailedCriteria(contract, lastEval, config.passThreshold)
+        : [];
+
+      await runGenerator(config.workDir, spec, contract, lastEval, retryFocusCriteria);
 
       // Evaluate
       progress.status = "evaluating";
       await writeProgress(config.workDir, progress);
 
-      lastEval = await runEvaluator(config.workDir, contract, config.passThreshold);
+      const rawEval = await runEvaluator(config.workDir, contract, config.passThreshold);
+      const stabilized = stabilizeEvaluation(contract, rawEval, config, sprintStabilityState);
+      lastEval = stabilized.result;
+      sprintStabilityState = stabilized.state;
+
+      if (config.retryStrategy === "stabilized") {
+        await writeSprintStabilityState(config.workDir, sprint, sprintStabilityState);
+        const { lockedPassRetained, unlockedRegressions, inconclusiveRetained } = stabilized.summary;
+        if (lockedPassRetained > 0 || unlockedRegressions > 0) {
+          log(
+            "HARNESS",
+            `Stabilized retry: retained ${lockedPassRetained} locked pass(es) (${inconclusiveRetained} inconclusive), unlocked ${unlockedRegressions} regression(s)`,
+          );
+        }
+      }
+
       await writeFeedback(config.workDir, sprint, retry, lastEval);
 
       if (lastEval.passed) {

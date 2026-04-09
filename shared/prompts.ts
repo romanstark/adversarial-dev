@@ -127,7 +127,7 @@ You MUST output your evaluation as a JSON object (and nothing else) with this ex
 }
 \`\`\`
 
-A sprint PASSES only if ALL criteria score at or above the criterion threshold (0-10 scale, default: 7).
+A sprint PASSES only if ALL criteria score at or above the criterion threshold (integer 1-10, default: 7).
 If ANY criterion falls below the threshold, the sprint FAILS and work goes back to the generator.`;
 
 export const CONTRACT_NEGOTIATION_GENERATOR_PROMPT = `You are proposing a sprint contract. Based on the product spec and the sprint number, propose what you will build and how success should be measured.
@@ -152,7 +152,7 @@ Rules:
 - Each criterion must be SPECIFIC and TESTABLE (not vague like "works well")
 - Include 5-15 criteria per sprint depending on complexity
 - Criteria should cover: functionality, error handling, code quality, and user experience
-- \`threshold\` MUST be a score threshold on a 0-10 scale (typically 6-9), not a raw metric target like milliseconds or bytes. Put raw targets in the description text.
+- \`threshold\` MUST be an integer score threshold on a 1-10 scale (typically 6-9), not a raw metric target like milliseconds or bytes. Put raw targets in the description text.
 - Output ONLY the JSON, no other text`;
 
 export const CONTRACT_NEGOTIATION_EVALUATOR_PROMPT = `You are reviewing a proposed sprint contract. Evaluate whether the criteria are specific enough, testable, and comprehensive.
@@ -165,4 +165,5 @@ Rules:
 - Criteria must be testable by reading code and running the app
 - Vague criteria like "works well" or "looks good" must be made specific
 - Ensure coverage of error handling and edge cases, not just happy paths
+- Ensure every criterion uses an integer \`threshold\` on the 1-10 score scale; move raw targets (ms, bytes, ratios) into the description text
 - Output either "APPROVED" or the revised JSON contract, nothing else`;

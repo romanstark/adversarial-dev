@@ -2,18 +2,8 @@ import { Codex } from "@openai/codex-sdk";
 import { EVALUATOR_SYSTEM_PROMPT } from "../shared/prompts.ts";
 import { CODEX_MODEL, CODEX_NETWORK_ACCESS } from "../shared/config.ts";
 import { log, logError } from "../shared/logger.ts";
+import { getCriterionThreshold } from "../shared/evaluation.ts";
 import type { SprintContract, EvalResult } from "../shared/types.ts";
-
-function getCriterionThreshold(contract: SprintContract, criterion: string, fallback: number): number {
-  const rawThreshold = contract.criteria.find((c) => c.name === criterion)?.threshold;
-  if (typeof rawThreshold !== "number" || !Number.isFinite(rawThreshold)) {
-    return fallback;
-  }
-  if (rawThreshold < 0 || rawThreshold > 10) {
-    return fallback;
-  }
-  return rawThreshold;
-}
 
 export async function runEvaluator(
   workDir: string,
@@ -53,13 +43,13 @@ Examine the application in the \`app/\` directory. Read the code, run it if poss
   log("EVALUATOR", `Evaluation complete for sprint ${sprint}`);
 
   const invalidThresholds = contract.criteria
-    .filter((criterion) => Number.isFinite(criterion.threshold) && (criterion.threshold < 0 || criterion.threshold > 10))
+    .filter((criterion) => !Number.isInteger(criterion.threshold) || criterion.threshold < 1 || criterion.threshold > 10)
     .map((criterion) => `${criterion.name}=${criterion.threshold}`);
 
   if (invalidThresholds.length > 0) {
     log(
       "EVALUATOR",
-      `Ignoring ${invalidThresholds.length} out-of-range contract thresholds (expected 0-10): ${invalidThresholds.join(", ")}`,
+      `Ignoring ${invalidThresholds.length} invalid contract thresholds (expected integer 1-10): ${invalidThresholds.join(", ")}`,
     );
   }
 

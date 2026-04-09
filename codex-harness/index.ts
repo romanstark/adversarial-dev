@@ -3,11 +3,13 @@ import { readFile } from "fs/promises";
 import { runHarness } from "./harness.ts";
 import { DEFAULT_CONFIG } from "../shared/config.ts";
 import { log, logError, logDivider } from "../shared/logger.ts";
-import type { HarnessConfig, ResumeMode } from "../shared/types.ts";
+import type { HarnessConfig, ResumeMode, RetryStrategy } from "../shared/types.ts";
 
 let userPrompt: string | undefined;
 let promptFilePath: string | undefined;
 let resumeMode: ResumeMode | undefined;
+let retryStrategy: RetryStrategy | undefined;
+let hardFailUnlockStreak: number | undefined;
 
 const args = process.argv.slice(2);
 
@@ -39,6 +41,27 @@ for (let i = 0; i < args.length; i++) {
     process.exit(1);
   }
 
+  if (arg.startsWith("--retry-strategy=")) {
+    const mode = arg.split("=")[1];
+    if (mode === "strict" || mode === "stabilized") {
+      retryStrategy = mode;
+      continue;
+    }
+    console.error(`Error: invalid retry strategy '${mode}'. Expected strict or stabilized.`);
+    process.exit(1);
+  }
+
+  if (arg.startsWith("--hard-fail-unlock-streak=")) {
+    const raw = arg.split("=")[1];
+    const parsed = raw ? parseInt(raw, 10) : NaN;
+    if (Number.isInteger(parsed) && parsed >= 1) {
+      hardFailUnlockStreak = parsed;
+      continue;
+    }
+    console.error(`Error: invalid hard fail unlock streak '${raw}'. Expected integer >= 1.`);
+    process.exit(1);
+  }
+
   userPrompt = userPrompt ? `${userPrompt} ${arg}` : arg;
 }
 
@@ -50,6 +73,8 @@ if (!userPrompt && !resumeMode) {
   console.error("Usage: bun run codex-harness/index.ts <prompt>");
   console.error('       bun run codex-harness/index.ts --file <path-to-prompt.md>');
   console.error('       bun run codex-harness/index.ts --resume[=strict|reset-retries|reset-contract]');
+  console.error('       bun run codex-harness/index.ts --retry-strategy=strict|stabilized <prompt>');
+  console.error('       bun run codex-harness/index.ts --hard-fail-unlock-streak=2 <prompt>');
   console.error('       bun run codex-harness/index.ts --resume=reset-retries "optional prompt"');
   console.error('Example: bun run codex-harness/index.ts "Build a task manager with REST API and dashboard"');
   process.exit(1);
@@ -60,6 +85,8 @@ const config: HarnessConfig = {
   userPrompt: userPrompt ?? "RESUME",
   workDir: resolve("workspace/codex"),
   resumeMode,
+  retryStrategy: retryStrategy ?? DEFAULT_CONFIG.retryStrategy,
+  hardFailUnlockStreak: hardFailUnlockStreak ?? DEFAULT_CONFIG.hardFailUnlockStreak,
 };
 
 logDivider();
@@ -68,6 +95,8 @@ log("HARNESS", `Prompt: "${config.userPrompt}"`);
 if (resumeMode) {
   log("HARNESS", `Resume: ${resumeMode}`);
 }
+log("HARNESS", `Retry strategy: ${config.retryStrategy}`);
+log("HARNESS", `Hard fail unlock streak: ${config.hardFailUnlockStreak}`);
 logDivider();
 
 try {
