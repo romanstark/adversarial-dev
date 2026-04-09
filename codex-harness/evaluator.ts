@@ -5,7 +5,14 @@ import { log, logError } from "../shared/logger.ts";
 import type { SprintContract, EvalResult } from "../shared/types.ts";
 
 function getCriterionThreshold(contract: SprintContract, criterion: string, fallback: number): number {
-  return contract.criteria.find((c) => c.name === criterion)?.threshold ?? fallback;
+  const rawThreshold = contract.criteria.find((c) => c.name === criterion)?.threshold;
+  if (typeof rawThreshold !== "number" || !Number.isFinite(rawThreshold)) {
+    return fallback;
+  }
+  if (rawThreshold < 0 || rawThreshold > 10) {
+    return fallback;
+  }
+  return rawThreshold;
 }
 
 export async function runEvaluator(
@@ -44,6 +51,17 @@ Examine the application in the \`app/\` directory. Read the code, run it if poss
   const response = turn.finalResponse ?? "";
 
   log("EVALUATOR", `Evaluation complete for sprint ${sprint}`);
+
+  const invalidThresholds = contract.criteria
+    .filter((criterion) => Number.isFinite(criterion.threshold) && (criterion.threshold < 0 || criterion.threshold > 10))
+    .map((criterion) => `${criterion.name}=${criterion.threshold}`);
+
+  if (invalidThresholds.length > 0) {
+    log(
+      "EVALUATOR",
+      `Ignoring ${invalidThresholds.length} out-of-range contract thresholds (expected 0-10): ${invalidThresholds.join(", ")}`,
+    );
+  }
 
   const evalResult = parseEvalResult(response, contract, passThreshold);
 
