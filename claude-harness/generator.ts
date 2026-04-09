@@ -9,6 +9,7 @@ export async function runGenerator(
   spec: string,
   contract: SprintContract,
   previousFeedback?: EvalResult,
+  retryFocusCriteria: string[] = [],
 ): Promise<{ response: string; sessionId?: string }> {
   const sprint = contract.sprintNumber;
   const attempt = previousFeedback ? "retry" : "initial";
@@ -18,6 +19,10 @@ export async function runGenerator(
 
   if (previousFeedback) {
     prompt += `\n\n## Evaluation Feedback (MUST ADDRESS)\n\n${JSON.stringify(previousFeedback, null, 2)}`;
+    if (retryFocusCriteria.length > 0) {
+      prompt += `\n\n## Retry Focus (Scope Control)\n\nOnly these criteria are still failing and must be fixed now:\n${retryFocusCriteria.map((name) => `- ${name}`).join("\n")}`;
+      prompt += "\n\nMinimize changes outside the failing criteria. Preserve behavior for criteria that already pass unless a dependency forces a shared fix.";
+    }
     prompt += `\n\nThe previous attempt failed evaluation. Address every issue in the feedback above.`;
   } else {
     prompt += `\n\nImplement the features listed in this sprint contract. Work in the \`app/\` directory.`;

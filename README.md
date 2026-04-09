@@ -54,6 +54,26 @@ bun run codex-harness/index.ts "Build a personal task manager with a REST API, i
 
 Both harnesses write their output to `workspace/claude/` and `workspace/codex/` respectively. The built application lives in `workspace/{sdk}/app/`.
 
+### Resume an Existing Harness Run
+
+You can resume from an existing `workspace/{sdk}/progress.json` state:
+
+```bash
+# strict resume (default when no value is provided)
+bun run claude-harness/index.ts --resume
+
+# resume current sprint with retry counter reset
+bun run claude-harness/index.ts --resume=reset-retries
+
+# resume current sprint with a newly negotiated contract
+bun run claude-harness/index.ts --resume=reset-contract
+
+# opt into strict retry behavior (re-evaluate every regression immediately)
+bun run claude-harness/index.ts --resume --retry-strategy=strict
+```
+
+Same flags are supported for `codex-harness/index.ts`.
+
 ## Configuration
 
 Defaults are in `shared/config.ts`:
@@ -63,7 +83,10 @@ Defaults are in `shared/config.ts`:
 | `maxSprints` | 10 | Maximum number of sprints |
 | `maxRetriesPerSprint` | 3 | Max evaluation retries before failing a sprint |
 | `passThreshold` | 7 | Minimum score (out of 10) for each criterion |
+| `retryStrategy` | `stabilized` | Retry behavior: `stabilized` keeps previously verified criteria locked unless regressions persist |
+| `hardFailUnlockStreak` | 2 | Number of consecutive hard fails required to unlock a previously passed criterion |
 | `CLAUDE_MODEL` | `claude-sonnet-4-6` | Model for Claude harness |
+| `CLAUDE_MAX_TURNS` | 80 | Max Claude turns per agent run (higher improves long evaluation completion reliability) |
 | `CODEX_MODEL` | `gpt-5.4` | Model for Codex harness |
 
 ## How It Works
@@ -82,8 +105,10 @@ The generator reads the spec and contract, then implements features one at a tim
 ### 4. Evaluation Phase (per sprint)
 The evaluator reads the contract criteria, examines the code, **runs the application**, and tries to break it. It scores each criterion on a 1-10 scale. If all criteria pass (score >= 7/10), the sprint survives. If any fail, detailed feedback goes back to the generator -- with file paths, line numbers, and exact failure descriptions.
 
+When `stabilized` retry mode is enabled, evaluator parsing is hardened: if the first evaluator response is not valid JSON, the harness automatically retries the evaluator once with a strict JSON-only instruction before failing the sprint.
+
 ### 5. Retry Loop
-The generator reads the adversarial feedback, decides whether to refine or pivot, and rebuilds. This cycles up to 3 times per sprint. If a sprint can't survive the evaluator after all retries, the harness stops.
+The generator reads the adversarial feedback, decides whether to refine or pivot, and rebuilds. This cycles up to 3 times per sprint. In `stabilized` retry mode, criteria that have already passed are "locked" and only unlocked after repeated hard regressions, which reduces flakey fail/pass oscillations in long sprints.
 
 ### 6. Completion
 Once all sprints pass, you have a working application built incrementally with quality gates at every step -- every feature tested by an agent whose job was to break it.
@@ -126,6 +151,7 @@ Agents communicate through files, not shared conversation history. This keeps ea
 - `spec.md` -- Product specification from the planner
 - `contracts/sprint-{n}.json` -- Sprint contracts
 - `feedback/sprint-{n}-round-{m}.json` -- Evaluator feedback per attempt
+- `feedback/sprint-{n}-stability.json` -- Locked-pass stability state for retry stabilization
 - `progress.json` -- Harness state tracking
 
 ## The GAN Connection
