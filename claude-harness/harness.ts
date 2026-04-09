@@ -19,7 +19,7 @@ import {
   readSprintStabilityState,
   writeSprintStabilityState,
 } from "../shared/files.ts";
-import { stabilizeEvaluation, buildStabilityStateFromEval, getFailedCriteria } from "../shared/evaluation.ts";
+import { stabilizeEvaluation, buildStabilityStateFromEval, getFailedCriteria, getCriterionThreshold } from "../shared/evaluation.ts";
 import type {
   HarnessConfig,
   ResumeMode,
@@ -157,7 +157,23 @@ export async function runHarness(config: HarnessConfig): Promise<HarnessResult> 
       contract = await readContract(config.workDir, sprint);
     } else {
       log("HARNESS", "Negotiating sprint contract...");
-      contract = await negotiateContract(config.workDir, spec, sprint);
+      let negotiationAttempts = 0;
+      const maxNegotiationAttempts = 2;
+      while (true) {
+        try {
+          contract = await negotiateContract(config.workDir, spec, sprint);
+          break;
+        } catch (error) {
+          negotiationAttempts += 1;
+          if (negotiationAttempts >= maxNegotiationAttempts) {
+            throw error;
+          }
+          logError(
+            "HARNESS",
+            `Contract negotiation produced invalid output, retrying (${negotiationAttempts}/${maxNegotiationAttempts})...`,
+          );
+        }
+      }
       await writeContract(config.workDir, contract);
     }
     log("HARNESS", `Contract agreed: ${contract.criteria.length} criteria for ${contract.features.length} features`);
@@ -218,6 +234,19 @@ export async function runHarness(config: HarnessConfig): Promise<HarnessResult> 
 
       if (retry < config.maxRetriesPerSprint) {
         log("HARNESS", `Sprint ${sprint} failed attempt ${attempts}, retrying...`);
+
+        if (retry >= 1 && shouldRenegotiateContract(contract, lastEval, config.passThreshold)) {
+          log("HARNESS", "Evaluation indicates problematic contract fit, renegotiating sprint contract...");
+          try {
+            const renegotiated = await negotiateContract(config.workDir, spec, sprint);
+            contract = renegotiated;
+            await writeContract(config.workDir, contract);
+            sprintStabilityState = undefined;
+            log("HARNESS", `Renegotiated contract: ${contract.criteria.length} criteria for ${contract.features.length} features`);
+          } catch (error) {
+            logError("HARNESS", `Renegotiation failed, continuing with current contract: ${String(error)}`);
+          }
+        }
       } else {
         logError("HARNESS", `Sprint ${sprint} FAILED after ${attempts} attempts`);
       }
@@ -268,12 +297,8 @@ async function negotiateContract(
   spec: string,
   sprintNumber: number,
 ): Promise<SprintContract> {
-  // Generator proposes contract
-  const proposalPrompt = `## Product Spec\n\n${spec}\n\n## Sprint Number: ${sprintNumber}\n\nPropose a sprint contract for this sprint.`;
-
-  const proposalOptions: Options = {
+  const options: Options = {
     cwd: workDir,
-    systemPrompt: CONTRACT_NEGOTIATION_GENERATOR_PROMPT,
     permissionMode: "bypassPermissions",
     allowDangerouslySkipPermissions: true,
     tools: ["Read"],
@@ -282,47 +307,49 @@ async function negotiateContract(
     persistSession: false,
   };
 
-  let proposalText = "";
-  for await (const msg of query({ prompt: proposalPrompt, options: proposalOptions })) {
-    if (msg.type === "assistant") {
-      const message = msg as { message: { content: Array<{ type: string; text?: string }> } };
-      for (const block of message.message.content) {
-        if (block.type === "text" && block.text) {
-          proposalText += block.text;
-        }
-      }
+  const maxRounds = 3;
+  let proposalText = await runClaudePrompt(
+    {
+      ...options,
+      systemPrompt: CONTRACT_NEGOTIATION_GENERATOR_PROMPT,
+    },
+    `## Product Spec\n\n${spec}\n\n## Sprint Number: ${sprintNumber}\n\nPropose a sprint contract for this sprint.`,
+  );
+
+  for (let round = 1; round <= maxRounds; round++) {
+    log("HARNESS", `Contract negotiation round ${round}/${maxRounds}`);
+    const reviewText = await runClaudePrompt(
+      {
+        ...options,
+        systemPrompt: CONTRACT_NEGOTIATION_EVALUATOR_PROMPT,
+      },
+      `## Proposed Sprint Contract\n\n${proposalText}\n\nReview this contract.`,
+    );
+
+    if (isApprovedResponse(reviewText)) {
+      return parseContract(proposalText, sprintNumber);
     }
+
+    if (round === maxRounds) {
+      return parseContract(reviewText, sprintNumber);
+    }
+
+    const revisedProposal = await runClaudePrompt(
+      {
+        ...options,
+        systemPrompt: CONTRACT_NEGOTIATION_GENERATOR_PROMPT,
+      },
+      `## Product Spec\n\n${spec}\n\n## Sprint Number: ${sprintNumber}\n\n## Evaluator Feedback\n\n${reviewText}\n\nRevise the sprint contract to address the evaluator feedback.`,
+    );
+
+    if (isApprovedResponse(revisedProposal)) {
+      return parseContract(reviewText, sprintNumber);
+    }
+
+    proposalText = revisedProposal;
   }
 
-  // Evaluator reviews contract
-  const reviewPrompt = `## Proposed Sprint Contract\n\n${proposalText}\n\nReview this contract.`;
-
-  const reviewOptions: Options = {
-    cwd: workDir,
-    systemPrompt: CONTRACT_NEGOTIATION_EVALUATOR_PROMPT,
-    permissionMode: "bypassPermissions",
-    allowDangerouslySkipPermissions: true,
-    tools: ["Read"],
-    model: CLAUDE_MODEL,
-    maxTurns: 10,
-    persistSession: false,
-  };
-
-  let reviewText = "";
-  for await (const msg of query({ prompt: reviewPrompt, options: reviewOptions })) {
-    if (msg.type === "assistant") {
-      const message = msg as { message: { content: Array<{ type: string; text?: string }> } };
-      for (const block of message.message.content) {
-        if (block.type === "text" && block.text) {
-          reviewText += block.text;
-        }
-      }
-    }
-  }
-
-  // Parse the final contract (either the proposal if approved, or the revised version)
-  const contractSource = reviewText.trim() === "APPROVED" ? proposalText : reviewText;
-  return parseContract(contractSource, sprintNumber);
+  throw new Error(`Contract negotiation failed for sprint ${sprintNumber}`);
 }
 
 function parseContract(text: string, sprintNumber: number): SprintContract {
@@ -348,28 +375,38 @@ function parseContract(text: string, sprintNumber: number): SprintContract {
     }
   }
 
-  {
-    logError("HARNESS", "Failed to parse contract JSON, creating default");
-    return {
-      sprintNumber,
-      features: [`Sprint ${sprintNumber} features`],
-      criteria: [
-        {
-          name: "basic_functionality",
-          description: "Core features for this sprint are implemented and working",
-          threshold: 7,
-        },
-        {
-          name: "code_quality",
-          description: "Code is clean, well-structured, and follows best practices",
-          threshold: 7,
-        },
-        {
-          name: "error_handling",
-          description: "Errors are handled gracefully with appropriate user feedback",
-          threshold: 7,
-        },
-      ],
-    };
+  throw new Error(`Failed to parse contract JSON for sprint ${sprintNumber}. Raw output: ${text.slice(0, 300)}`);
+}
+
+function isApprovedResponse(text: string): boolean {
+  return text.trim().toUpperCase().startsWith("APPROVED");
+}
+
+async function runClaudePrompt(options: Options, prompt: string): Promise<string> {
+  let output = "";
+  for await (const msg of query({ prompt, options })) {
+    if (msg.type === "assistant") {
+      const message = msg as { message: { content: Array<{ type: string; text?: string }> } };
+      for (const block of message.message.content) {
+        if (block.type === "text" && block.text) {
+          output += block.text;
+        }
+      }
+    }
   }
+  return output;
+}
+
+function shouldRenegotiateContract(contract: SprintContract, evalResult: EvalResult | undefined, passThreshold: number): boolean {
+  if (!evalResult || evalResult.feedback.length === 0) {
+    return false;
+  }
+
+  const avgScore = evalResult.feedback.reduce((sum, item) => sum + item.score, 0) / evalResult.feedback.length;
+  const allFailing = evalResult.feedback.every((item) => {
+    const threshold = getCriterionThreshold(contract, item.criterion, passThreshold);
+    return item.score < threshold;
+  });
+
+  return allFailing || avgScore < 4;
 }
