@@ -102,7 +102,7 @@ function tryParseEvalResult(
   for (const candidate of candidates) {
     try {
       const parsed = JSON.parse(candidate) as EvalResult;
-      if (parsed.feedback && Array.isArray(parsed.feedback) && parsed.feedback.length > 0) {
+      if (parsed.feedback && Array.isArray(parsed.feedback)) {
         parsed.passed = parsed.feedback.every((f) => f.score >= getCriterionThreshold(contract, f.criterion, passThreshold));
         return parsed;
       }

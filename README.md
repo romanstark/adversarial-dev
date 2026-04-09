@@ -97,8 +97,7 @@ When you run a harness, here's what happens step by step:
 The planner takes your short prompt and generates a comprehensive product specification with features organized into sprints, a design language, and tech stack decisions. This spec is written to `spec.md`.
 
 ### 2. Contract Negotiation (per sprint)
-The generator proposes what it will build and how success should be measured. The evaluator reviews the criteria, making them more specific, adding edge cases, and raising the bar. Negotiation now runs in iterative rounds (up to 3) and accepts case-insensitive \
-`APPROVED...` responses. Contract parsing is fail-closed: malformed contract JSON causes renegotiation retries instead of silently falling back to generic criteria.
+The generator proposes what it will build and how success should be measured. The evaluator reviews the criteria, making them more specific, adding edge cases, and raising the bar. They iterate until locked in. The contract is saved as JSON.
 
 ### 3. Build Phase (per sprint)
 The generator reads the spec and contract, then implements features one at a time with git commits after each. It has full access to create files, run commands, install dependencies, and test code.
@@ -110,8 +109,6 @@ When `stabilized` retry mode is enabled, evaluator parsing is hardened: if the f
 
 ### 5. Retry Loop
 The generator reads the adversarial feedback, decides whether to refine or pivot, and rebuilds. This cycles up to 3 times per sprint. In `stabilized` retry mode, criteria that have already passed are "locked" and only unlocked after repeated hard regressions, which reduces flakey fail/pass oscillations in long sprints.
-
-Retry logic also guards against impossible contracts: after early failed retries, the harness computes average criterion score and whether all criteria are below threshold; if quality is clearly misaligned (all failing or average score below 4), it renegotiates the sprint contract mid-sprint instead of wasting remaining retries.
 
 ### 6. Completion
 Once all sprints pass, you have a working application built incrementally with quality gates at every step -- every feature tested by an agent whose job was to break it.

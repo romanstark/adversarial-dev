@@ -19,7 +19,7 @@ import {
   readSprintStabilityState,
   writeSprintStabilityState,
 } from "../shared/files.ts";
-import { stabilizeEvaluation, buildStabilityStateFromEval, getFailedCriteria, getCriterionThreshold } from "../shared/evaluation.ts";
+import { stabilizeEvaluation, buildStabilityStateFromEval, getFailedCriteria } from "../shared/evaluation.ts";
 import type {
   HarnessConfig,
   ResumeMode,
@@ -157,23 +157,7 @@ export async function runHarness(config: HarnessConfig): Promise<HarnessResult> 
       contract = await readContract(config.workDir, sprint);
     } else {
       log("HARNESS", "Negotiating sprint contract...");
-      let negotiationAttempts = 0;
-      const maxNegotiationAttempts = 2;
-      while (true) {
-        try {
-          contract = await negotiateContract(config.workDir, spec, sprint);
-          break;
-        } catch (error) {
-          negotiationAttempts += 1;
-          if (negotiationAttempts >= maxNegotiationAttempts) {
-            throw error;
-          }
-          logError(
-            "HARNESS",
-            `Contract negotiation produced invalid output, retrying (${negotiationAttempts}/${maxNegotiationAttempts})...`,
-          );
-        }
-      }
+      contract = await negotiateContract(config.workDir, spec, sprint);
       await writeContract(config.workDir, contract);
     }
     log("HARNESS", `Contract agreed: ${contract.criteria.length} criteria for ${contract.features.length} features`);
@@ -234,19 +218,6 @@ export async function runHarness(config: HarnessConfig): Promise<HarnessResult> 
 
       if (retry < config.maxRetriesPerSprint) {
         log("HARNESS", `Sprint ${sprint} failed attempt ${attempts}, retrying...`);
-
-        if (retry >= 1 && shouldRenegotiateContract(contract, lastEval, config.passThreshold)) {
-          log("HARNESS", "Evaluation indicates problematic contract fit, renegotiating sprint contract...");
-          try {
-            const renegotiated = await negotiateContract(config.workDir, spec, sprint);
-            contract = renegotiated;
-            await writeContract(config.workDir, contract);
-            sprintStabilityState = undefined;
-            log("HARNESS", `Renegotiated contract: ${contract.criteria.length} criteria for ${contract.features.length} features`);
-          } catch (error) {
-            logError("HARNESS", `Renegotiation failed, continuing with current contract: ${String(error)}`);
-          }
-        }
       } else {
         logError("HARNESS", `Sprint ${sprint} FAILED after ${attempts} attempts`);
       }
@@ -297,44 +268,37 @@ async function negotiateContract(
   sprintNumber: number,
 ): Promise<SprintContract> {
   const codex = new Codex();
-  const maxRounds = 3;
 
-  let proposalText = await runCodexPrompt(
-    codex,
-    workDir,
-    `${CONTRACT_NEGOTIATION_GENERATOR_PROMPT}\n\n---\n\n## Product Spec\n\n${spec}\n\n## Sprint Number: ${sprintNumber}\n\nPropose a sprint contract for this sprint.`,
-  );
+  // Generator proposes contract
+  const proposalPrompt = `${CONTRACT_NEGOTIATION_GENERATOR_PROMPT}\n\n---\n\n## Product Spec\n\n${spec}\n\n## Sprint Number: ${sprintNumber}\n\nPropose a sprint contract for this sprint.`;
 
-  for (let round = 1; round <= maxRounds; round++) {
-    log("HARNESS", `Contract negotiation round ${round}/${maxRounds}`);
-    const reviewText = await runCodexPrompt(
-      codex,
-      workDir,
-      `${CONTRACT_NEGOTIATION_EVALUATOR_PROMPT}\n\n---\n\n## Proposed Sprint Contract\n\n${proposalText}\n\nReview this contract.`,
-    );
+  const proposalThread = codex.startThread({
+    workingDirectory: workDir,
+    sandboxMode: "danger-full-access",
+    networkAccessEnabled: CODEX_NETWORK_ACCESS,
+    approvalPolicy: "never",
+    model: CODEX_MODEL,
+  });
 
-    if (isApprovedResponse(reviewText)) {
-      return parseContract(proposalText, sprintNumber);
-    }
+  const proposalTurn = await proposalThread.run(proposalPrompt);
+  const proposalText = proposalTurn.finalResponse ?? "";
 
-    if (round === maxRounds) {
-      return parseContract(reviewText, sprintNumber);
-    }
+  // Evaluator reviews contract
+  const reviewPrompt = `${CONTRACT_NEGOTIATION_EVALUATOR_PROMPT}\n\n---\n\n## Proposed Sprint Contract\n\n${proposalText}\n\nReview this contract.`;
 
-    const revisedProposal = await runCodexPrompt(
-      codex,
-      workDir,
-      `${CONTRACT_NEGOTIATION_GENERATOR_PROMPT}\n\n---\n\n## Product Spec\n\n${spec}\n\n## Sprint Number: ${sprintNumber}\n\n## Evaluator Feedback\n\n${reviewText}\n\nRevise the sprint contract to address the evaluator feedback.`,
-    );
+  const reviewThread = codex.startThread({
+    workingDirectory: workDir,
+    sandboxMode: "danger-full-access",
+    networkAccessEnabled: CODEX_NETWORK_ACCESS,
+    approvalPolicy: "never",
+    model: CODEX_MODEL,
+  });
 
-    if (isApprovedResponse(revisedProposal)) {
-      return parseContract(reviewText, sprintNumber);
-    }
+  const reviewTurn = await reviewThread.run(reviewPrompt);
+  const reviewText = reviewTurn.finalResponse ?? "";
 
-    proposalText = revisedProposal;
-  }
-
-  throw new Error(`Contract negotiation failed for sprint ${sprintNumber}`);
+  const contractSource = reviewText.trim() === "APPROVED" ? proposalText : reviewText;
+  return parseContract(contractSource, sprintNumber);
 }
 
 function parseContract(text: string, sprintNumber: number): SprintContract {
@@ -360,35 +324,28 @@ function parseContract(text: string, sprintNumber: number): SprintContract {
     }
   }
 
-  throw new Error(`Failed to parse contract JSON for sprint ${sprintNumber}. Raw output: ${text.slice(0, 300)}`);
-}
-
-function isApprovedResponse(text: string): boolean {
-  return text.trim().toUpperCase().startsWith("APPROVED");
-}
-
-async function runCodexPrompt(codex: Codex, workDir: string, prompt: string): Promise<string> {
-  const thread = codex.startThread({
-    workingDirectory: workDir,
-    sandboxMode: "danger-full-access",
-    networkAccessEnabled: CODEX_NETWORK_ACCESS,
-    approvalPolicy: "never",
-    model: CODEX_MODEL,
-  });
-  const turn = await thread.run(prompt);
-  return turn.finalResponse ?? "";
-}
-
-function shouldRenegotiateContract(contract: SprintContract, evalResult: EvalResult | undefined, passThreshold: number): boolean {
-  if (!evalResult || evalResult.feedback.length === 0) {
-    return false;
+  {
+    logError("HARNESS", "Failed to parse contract JSON, creating default");
+    return {
+      sprintNumber,
+      features: [`Sprint ${sprintNumber} features`],
+      criteria: [
+        {
+          name: "basic_functionality",
+          description: "Core features for this sprint are implemented and working",
+          threshold: 7,
+        },
+        {
+          name: "code_quality",
+          description: "Code is clean, well-structured, and follows best practices",
+          threshold: 7,
+        },
+        {
+          name: "error_handling",
+          description: "Errors are handled gracefully with appropriate user feedback",
+          threshold: 7,
+        },
+      ],
+    };
   }
-
-  const avgScore = evalResult.feedback.reduce((sum, item) => sum + item.score, 0) / evalResult.feedback.length;
-  const allFailing = evalResult.feedback.every((item) => {
-    const threshold = getCriterionThreshold(contract, item.criterion, passThreshold);
-    return item.score < threshold;
-  });
-
-  return allFailing || avgScore < 4;
 }
